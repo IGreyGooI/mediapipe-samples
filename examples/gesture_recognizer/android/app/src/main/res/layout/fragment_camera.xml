@@ -30,7 +30,13 @@
         android:id="@+id/overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
-
+    <include
+        android:id="@+id/data_collection_controls"
+        layout="@layout/data_collection_controls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginTop="?android:attr/actionBarSize" />
     <include
         android:id="@+id/bottom_sheet_layout"
         layout="@layout/info_bottom_sheet" />

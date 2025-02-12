@@ -16,24 +16,38 @@
 package com.google.mediapipe.examples.gesturerecognizer.fragment
 
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.view.Surface
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.Spinner
 import android.widget.Toast
+import com.google.android.material.textfield.TextInputEditText
+import com.google.mediapipe.examples.gesturerecognizer.R
 import androidx.camera.core.*
+import androidx.camera.core.ImageInfo
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.navigation.Navigation
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.mediapipe.examples.gesturerecognizer.DataCollectionHelper
 import com.google.mediapipe.examples.gesturerecognizer.GestureRecognizerHelper
 import com.google.mediapipe.examples.gesturerecognizer.MainViewModel
-import com.google.mediapipe.examples.gesturerecognizer.R
 import com.google.mediapipe.examples.gesturerecognizer.databinding.FragmentCameraBinding
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import java.util.*
@@ -54,8 +68,10 @@ class CameraFragment : Fragment(),
         get() = _fragmentCameraBinding!!
 
     private lateinit var gestureRecognizerHelper: GestureRecognizerHelper
+    private lateinit var dataCollectionHelper: DataCollectionHelper
     private val viewModel: MainViewModel by activityViewModels()
     private var defaultNumResults = 1
+    private var isCapturing = false
     private val gestureRecognizerResultAdapter: GestureRecognizerResultsAdapter by lazy {
         GestureRecognizerResultsAdapter().apply {
             updateAdapterSize(defaultNumResults)
@@ -134,6 +150,12 @@ class CameraFragment : Fragment(),
 
         // Initialize our background executor
         backgroundExecutor = Executors.newSingleThreadExecutor()
+
+        // Initialize data collection helper
+        dataCollectionHelper = DataCollectionHelper(requireContext())
+
+        // Initialize data collection controls
+        initDataCollectionControls()
 
         // Wait for the views to be properly laid out
         fragmentCameraBinding.viewFinder.post {
@@ -385,6 +407,143 @@ class CameraFragment : Fragment(),
                 // Force a redraw
                 fragmentCameraBinding.overlay.invalidate()
             }
+        }
+    }
+
+    private fun initDataCollectionControls() {
+        val root = fragmentCameraBinding.root
+        
+        // Setup spinner with existing categories
+        val categories = dataCollectionHelper.getCategories().toMutableList()
+        val spinnerAdapter = ArrayAdapter<String>(
+            requireContext(),
+            android.R.layout.simple_spinner_item,
+            categories
+        )
+        spinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        // Setup spinner
+        root.findViewById<Spinner>(R.id.gesture_category_spinner).apply {
+            adapter = spinnerAdapter
+        }
+
+        // Setup add category button
+        root.findViewById<Button>(R.id.add_category_button).setOnClickListener {
+            showAddCategoryDialog(spinnerAdapter)
+        }
+
+        // Handle capture button click
+        root.findViewById<Button>(R.id.capture_button).setOnClickListener {
+            if (!isCapturing) {
+                val selectedCategory = root.findViewById<Spinner>(R.id.gesture_category_spinner).selectedItem as String
+                val delaySeconds = root.findViewById<TextInputEditText>(R.id.capture_delay_input).text.toString().toFloatOrNull() ?: 0.9f
+                
+                isCapturing = true
+                
+                // Show countdown toast
+                Toast.makeText(requireContext(), "Capturing in $delaySeconds seconds...", Toast.LENGTH_SHORT).show()
+                
+                // Delayed capture
+                Handler(Looper.getMainLooper()).postDelayed({
+                    captureImage(selectedCategory)
+                    isCapturing = false
+                }, (delaySeconds * 1000).toLong())
+            }
+        }
+    }
+
+    private fun showAddCategoryDialog(adapter: ArrayAdapter<String>) {
+        val input = EditText(requireContext()).apply {
+            hint = "Enter new category name"
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Add New Category")
+            .setView(input)
+            .setPositiveButton("Add") { _, _ ->
+                val newCategory = input.text.toString().trim()
+                if (newCategory.isNotBlank() && adapter.getPosition(newCategory) == -1) {
+                    dataCollectionHelper.createCategoryIfNotExists(newCategory)
+                    adapter.add(newCategory)
+                    adapter.notifyDataSetChanged()
+                    // Select the newly added category
+                    fragmentCameraBinding.root.findViewById<Spinner>(R.id.gesture_category_spinner).setSelection(adapter.getPosition(newCategory))
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun captureImage(category: String) {
+        val imageAnalyzer = ImageAnalysis.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .setTargetRotation(fragmentCameraBinding.viewFinder.display.rotation)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .build()
+
+        var captured = false
+        imageAnalyzer.setAnalyzer(backgroundExecutor) { image ->
+            if (!captured) {
+                captured = true
+                try {
+                    val bitmap = Bitmap.createBitmap(
+                        image.width, image.height, Bitmap.Config.ARGB_8888
+                    )
+                    bitmap.copyPixelsFromBuffer(image.planes[0].buffer)
+                    
+                    // Get the device orientation and calculate required rotation
+                    val rotation = when (fragmentCameraBinding.viewFinder.display.rotation) {
+                        Surface.ROTATION_0 -> 0f
+                        Surface.ROTATION_90 -> 270f
+                        Surface.ROTATION_180 -> 180f
+                        Surface.ROTATION_270 -> 90f
+                        else -> 0f
+                    }
+                    // Apply additional rotation based on camera facing
+                    val finalRotation = if (cameraFacing == CameraSelector.LENS_FACING_FRONT) {
+                        (360f - rotation) % 360f // Mirror the rotation for front camera
+                    } else {
+                        rotation
+                    }
+                    val matrix = Matrix()
+                    matrix.postRotate(finalRotation)
+                    val rotatedBitmap = Bitmap.createBitmap(
+                        bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                    )
+                    
+                    dataCollectionHelper.saveImage(rotatedBitmap, category)
+                    val path = "${dataCollectionHelper.getDatasetPath()}/$category"
+                    activity?.runOnUiThread {
+                        Toast.makeText(requireContext(), "Image saved to: $path", Toast.LENGTH_LONG).show()
+                    }
+                    bitmap.recycle()
+                    rotatedBitmap.recycle()
+                } catch (e: Exception) {
+                    activity?.runOnUiThread {
+                        Toast.makeText(requireContext(), "Failed to save image: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    image.close()
+                    imageAnalyzer.clearAnalyzer()
+                }
+            }
+        }
+
+        val cameraProvider = cameraProvider ?: return
+        try {
+            cameraProvider.unbindAll()
+            camera = cameraProvider.bindToLifecycle(
+                this,
+                CameraSelector.Builder().requireLensFacing(cameraFacing).build(),
+                imageAnalyzer
+            )
+            // Rebind preview after capture
+            Handler(Looper.getMainLooper()).postDelayed({
+                bindCameraUseCases()
+            }, 500)
+        } catch (e: Exception) {
+            Toast.makeText(requireContext(), "Failed to capture image: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
